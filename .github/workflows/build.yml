@@ -1,0 +1,208 @@
+name: Build APK
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.5'
+      - name: Create project files
+        run: |
+          mkdir -p app/src/main/java/com/example/soundmeter
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = 'SoundMeter'
+          include ':app'
+          EOF
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.1.4' apply false
+          }
+          EOF
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2g
+          android.useAndroidX=false
+          EOF
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+          android {
+              namespace 'com.example.soundmeter'
+              compileSdk 34
+              defaultConfig {
+                  applicationId 'com.example.soundmeter2'
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 2
+                  versionName '1.1'
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          EOF
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.RECORD_AUDIO" />
+              <application android:label="Sound Meter">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+          cat > app/src/main/java/com/example/soundmeter/MainActivity.java <<'EOF'
+          package com.example.soundmeter;
+
+          import android.Manifest;
+          import android.app.Activity;
+          import android.content.pm.PackageManager;
+          import android.graphics.Color;
+          import android.media.AudioFormat;
+          import android.media.AudioRecord;
+          import android.media.MediaRecorder;
+          import android.os.Bundle;
+          import android.view.Gravity;
+          import android.widget.LinearLayout;
+          import android.widget.ProgressBar;
+          import android.widget.TextView;
+
+          public class MainActivity extends Activity {
+              private TextView dbText, levelText, minMaxText;
+              private ProgressBar bar;
+              private volatile boolean running = false;
+              private double minDb = 999, maxDb = 0;
+
+              @Override
+              protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setGravity(Gravity.CENTER);
+                  root.setPadding(48, 48, 48, 48);
+                  dbText = new TextView(this);
+                  dbText.setTextSize(72);
+                  dbText.setGravity(Gravity.CENTER);
+                  dbText.setText("-- dB");
+                  levelText = new TextView(this);
+                  levelText.setTextSize(24);
+                  levelText.setGravity(Gravity.CENTER);
+                  bar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+                  bar.setMax(120);
+                  minMaxText = new TextView(this);
+                  minMaxText.setTextSize(16);
+                  minMaxText.setGravity(Gravity.CENTER);
+                  root.addView(dbText);
+                  root.addView(levelText);
+                  root.addView(bar, new LinearLayout.LayoutParams(
+                          LinearLayout.LayoutParams.MATCH_PARENT,
+                          LinearLayout.LayoutParams.WRAP_CONTENT));
+                  root.addView(minMaxText);
+                  setContentView(root);
+                  if (checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                          != PackageManager.PERMISSION_GRANTED) {
+                      requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, 1);
+                  }
+              }
+
+              @Override
+              protected void onResume() {
+                  super.onResume();
+                  if (checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                          == PackageManager.PERMISSION_GRANTED) {
+                      startMeter();
+                  }
+              }
+
+              @Override
+              public void onRequestPermissionsResult(int code, String[] perms, int[] res) {
+                  super.onRequestPermissionsResult(code, perms, res);
+                  if (res.length > 0 && res[0] == PackageManager.PERMISSION_GRANTED) startMeter();
+              }
+
+              @Override
+              protected void onPause() {
+                  super.onPause();
+                  running = false;
+              }
+
+              private void startMeter() {
+                  if (running) return;
+                  running = true;
+                  new Thread(() -> {
+                      int rate = 44100;
+                      int buf = AudioRecord.getMinBufferSize(rate,
+                              AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
+                      AudioRecord rec = new AudioRecord(MediaRecorder.AudioSource.MIC, rate,
+                              AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, buf * 2);
+                      rec.startRecording();
+                      short[] data = new short[buf];
+                      while (running) {
+                          int n = rec.read(data, 0, data.length);
+                          if (n > 0) {
+                              double sum = 0;
+                              for (int i = 0; i < n; i++) sum += (double) data[i] * data[i];
+                              double rms = Math.sqrt(sum / n);
+                              double db = rms > 0 ? 20 * Math.log10(rms / 32768.0) + 110 : 0;
+                              if (db < 0) db = 0;
+                              if (db > 120) db = 120;
+                              final double v = db;
+                              runOnUiThread(() -> update(v));
+                          }
+                      }
+                      rec.stop();
+                      rec.release();
+                  }).start();
+              }
+
+              private void update(double db) {
+                  if (db < minDb) minDb = db;
+                  if (db > maxDb) maxDb = db;
+                  dbText.setText(Math.round(db) + " dB");
+                  bar.setProgress((int) db);
+                  String level;
+                  int color;
+                  if (db < 40) { level = "Quiet"; color = Color.rgb(46, 125, 50); }
+                  else if (db < 70) { level = "Normal"; color = Color.rgb(25, 118, 210); }
+                  else if (db < 90) { level = "Loud"; color = Color.rgb(245, 124, 0); }
+                  else { level = "Very loud"; color = Color.rgb(211, 47, 47); }
+                  levelText.setText(level);
+                  levelText.setTextColor(color);
+                  dbText.setTextColor(color);
+                  minMaxText.setText("Min " + Math.round(minDb) + " dB   Max " + Math.round(maxDb) + " dB");
+              }
+          }
+          EOF
+      - name: Build debug APK
+        run: gradle assembleDebug --no-daemon
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SoundMeter-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
